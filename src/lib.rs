@@ -148,7 +148,8 @@ impl PvebU {
         });
     }
 
-    pub fn unset(&mut self, key: u8) {
+    pub fn unset(&mut self, key: &u8) {
+        let key = *key;
         assert!(key < self.u);
 
         *self.find_mut(key) = false;
@@ -157,7 +158,7 @@ impl PvebU {
         self.summary.iter_mut().for_each(|summary| {
             summary.n = summary.n.saturating_sub(1);
             if summary.n == 0 {
-                summary.pveb.unset(cluster_idx);
+                summary.pveb.unset(&cluster_idx);
             }
         });
     }
@@ -207,35 +208,93 @@ mod tests {
     use anyhow::{anyhow, Result};
     use quickcheck::{Arbitrary, Gen};
     use quickcheck_macros::quickcheck;
-    use std::collections::{HashMap, HashSet};
+    use std::collections::{BTreeSet, HashMap};
     use std::iter;
+    use std::ops::Rem;
+
+    #[derive(Clone, Debug)]
+    enum MemberOp {
+        Set(u8),
+        Unset(u8),
+    }
+
+    impl Rem<u8> for MemberOp {
+        type Output = Self;
+        fn rem(mut self, rhs: u8) -> Self {
+            let key = match &mut self {
+                MemberOp::Set(key) => key,
+                MemberOp::Unset(key) => key,
+            };
+            *key %= rhs;
+            self
+        }
+    }
+
+    impl Arbitrary for MemberOp {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            let key = u8::arbitrary(g);
+            match bool::arbitrary(g) {
+                true => MemberOp::Set(key),
+                false => MemberOp::Unset(key),
+            }
+        }
+    }
 
     #[derive(Clone, Debug)]
     struct InsertionInput {
         u: usize,
-        sets: HashSet<u8>,
+        member_ops: Vec<MemberOp>,
     }
 
     impl Arbitrary for InsertionInput {
         fn arbitrary<G: Gen>(g: &mut G) -> Self {
             let m = u32::arbitrary(g) % 3;
             let u: usize = 2u32.pow(2u32.pow(m)) as usize;
+            let key_cap = u as u8;
 
-            let sets = usize::arbitrary(g) % u;
-            let set_gen = || Some((usize::arbitrary(g) % u) as u8);
-            let set_gen = iter::from_fn(set_gen);
-            let sets = set_gen.take(sets).collect();
+            let op_count = usize::arbitrary(g) % (u * 2);
+            let op_gen = || Some(MemberOp::arbitrary(g) % key_cap);
+            let op_gen = iter::from_fn(op_gen);
+            let member_ops = op_gen.take(op_count).collect();
 
-            InsertionInput { u, sets }
+            InsertionInput { u, member_ops }
         }
 
         fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
             let u = self.u;
             Box::new(
-                self.sets
+                self.member_ops
                     .shrink()
-                    .map(move |sets| InsertionInput { sets, u }),
+                    .map(move |member_ops| InsertionInput { member_ops, u }),
             )
+        }
+    }
+
+    #[derive(Debug)]
+    struct Report<'a> {
+        member_ops: &'a [MemberOp],
+        expected: BTreeSet<u8>,
+    }
+
+    impl InsertionInput {
+        /// Applies sets and unsets to the tree. Returns the set of what
+        /// ought to be set in the tree at the end.
+        fn apply(&self, pveb: &mut PvebU) -> Report {
+            let mut expected = BTreeSet::new();
+            self.member_ops.iter().cloned().for_each(|op| match op {
+                MemberOp::Set(key) => {
+                    pveb.set(key);
+                    expected.insert(key);
+                }
+                MemberOp::Unset(key) => {
+                    pveb.unset(&key);
+                    expected.remove(&key);
+                }
+            });
+            Report {
+                member_ops: self.member_ops.as_slice(),
+                expected,
+            }
         }
     }
 
@@ -243,14 +302,12 @@ mod tests {
     fn is_set(insertion_input: InsertionInput) -> Result<()> {
         let mut pv = PvebU::new(Capacity::C16);
 
-        for key in &insertion_input.sets {
-            pv.set(*key);
-        }
+        let report = insertion_input.apply(&mut pv);
 
         let mut false_positive = vec![];
         let mut false_negative = vec![];
         for i in (0..(insertion_input.u)).map(|i| i as u8) {
-            let expected_positive = insertion_input.sets.contains(&i);
+            let expected_positive = report.expected.contains(&i);
 
             match (expected_positive, pv.is_set(i)) {
                 (true, false) => false_negative.push(i),
@@ -262,11 +319,11 @@ mod tests {
         if !false_positive.is_empty() || !false_negative.is_empty() {
             return Err(anyhow!(
                 concat!(
-                    "Incorrect state after setting {:?}. ",
+                    "Incorrect state after configuration {:#?}. ",
                     "False negatives: {:?}. ",
                     "False positives: {:?}."
                 ),
-                insertion_input.sets,
+                report,
                 false_negative,
                 false_positive
             ));
