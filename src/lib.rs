@@ -90,6 +90,52 @@ impl PvebU {
         }
     }
 
+    pub fn min(&self) -> Option<u8> {
+        self.min_(0)
+    }
+
+    fn min_cluster(&self) -> Option<(u8, &PvebU)> {
+        self.clusters
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, cluster)| match cluster {
+                Cluster::NonLeaf(pveb) => Some((idx, pveb)),
+                _ => None,
+            })
+            .find(|(_, pveb)| {
+                pveb.summary
+                    .as_ref()
+                    .map(|summary| summary.n > 0)
+                    .unwrap_or(false)
+            })
+            .map(|(idx, pveb)| (idx as u8, pveb))
+    }
+
+    fn min_leaf(&self) -> Option<u8> {
+        self.clusters
+            .iter()
+            .map(|cluster| match cluster {
+                Cluster::Leaf(switch) => *switch,
+                _ => false,
+            })
+            .position(std::convert::identity)
+            .map(|i| i as u8)
+    }
+
+    fn min_(&self, path_key: u8) -> Option<u8> {
+        let min_cluster = self.min_cluster();
+        let min_leaf = self.min_leaf();
+        match (min_cluster, min_leaf) {
+            (Some((cluster_idx, cluster)), None) => {
+                let path_key = path_key + self.u_sqrt * cluster_idx;
+                cluster.min_(path_key)
+            }
+            (None, Some(leaf_idx)) => Some(path_key + leaf_idx),
+            (None, None) => None,
+            (Some(_), Some(_)) => panic!("Pveb has both leaf and nonleaf children: {:#?}", self),
+        }
+    }
+
     pub fn set(&mut self, key: u8) {
         assert!(key < self.u);
 
@@ -205,5 +251,23 @@ mod tests {
         pv.set(12);
         assert!(pv.is_set(12));
         assert!(pv.is_set(1));
+    }
+
+    #[test]
+    fn min_c16() {
+        let mut pv = PvebU::new(Capacity::C16);
+
+        pv.set(9);
+        assert_eq!(pv.min(), Some(9));
+
+        pv.set(8);
+        assert_eq!(pv.min(), Some(8));
+
+        pv.set(1);
+        pv.set(7);
+        assert_eq!(pv.min(), Some(1));
+
+        pv.unset(1);
+        assert_eq!(pv.min(), Some(7));
     }
 }
