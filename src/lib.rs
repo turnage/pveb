@@ -331,4 +331,28 @@ mod tests {
 
         Ok(())
     }
+
+    #[quickcheck]
+    fn min(insertion_input: InsertionInput) -> Result<()> {
+        let mut pv = PvebU::new(Capacity::C16);
+
+        let report = insertion_input.apply(&mut pv);
+        let expected_min = report.expected.iter().next().cloned();
+        let actual_min = pv.min();
+
+        if actual_min != expected_min {
+            return Err(anyhow!(
+                concat!(
+                    "Incorrect state after configuration: {:#?}. ",
+                    "Expected minimum element: {:?}. ",
+                    "Got minimum element: {:?}."
+                ),
+                report,
+                expected_min,
+                actual_min
+            ));
+        }
+
+        Ok(())
+    }
 }
