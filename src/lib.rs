@@ -204,70 +204,74 @@ impl PvebU {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::{anyhow, Result};
+    use quickcheck::{Arbitrary, Gen};
+    use quickcheck_macros::quickcheck;
+    use std::collections::{HashMap, HashSet};
+    use std::iter;
 
-    #[test]
-    fn is_set_c2() {
-        let mut pv = PvebU::new(Capacity::C2);
-
-        assert!(!pv.is_set(0));
-        assert!(!pv.is_set(1));
-
-        pv.set(1);
-        assert!(!pv.is_set(0));
-        assert!(pv.is_set(1));
-
-        pv.set(0);
-        assert!(pv.is_set(0));
-        assert!(pv.is_set(1));
+    #[derive(Clone, Debug)]
+    struct InsertionInput {
+        u: usize,
+        sets: HashSet<u8>,
     }
 
-    #[test]
-    fn is_set_c4() {
-        let mut pv = PvebU::new(Capacity::C4);
+    impl Arbitrary for InsertionInput {
+        fn arbitrary<G: Gen>(g: &mut G) -> Self {
+            let m = u32::arbitrary(g) % 3;
+            let u: usize = 2u32.pow(2u32.pow(m)) as usize;
 
-        assert!(!pv.is_set(0));
-        assert!(!pv.is_set(1));
+            let sets = usize::arbitrary(g) % u;
+            let set_gen = || Some((usize::arbitrary(g) % u) as u8);
+            let set_gen = iter::from_fn(set_gen);
+            let sets = set_gen.take(sets).collect();
 
-        pv.set(1);
-        assert!(!pv.is_set(0));
-        assert!(pv.is_set(1), "{:#?}", pv);
+            InsertionInput { u, sets }
+        }
 
-        pv.set(3);
-        assert!(pv.is_set(3));
-        assert!(pv.is_set(1));
+        fn shrink(&self) -> Box<dyn Iterator<Item = Self>> {
+            let u = self.u;
+            Box::new(
+                self.sets
+                    .shrink()
+                    .map(move |sets| InsertionInput { sets, u }),
+            )
+        }
     }
 
-    #[test]
-    fn is_set_c16() {
+    #[quickcheck]
+    fn is_set(insertion_input: InsertionInput) -> Result<()> {
         let mut pv = PvebU::new(Capacity::C16);
 
-        assert!(!pv.is_set(0));
-        assert!(!pv.is_set(1));
+        for key in &insertion_input.sets {
+            pv.set(*key);
+        }
 
-        pv.set(1);
-        assert!(!pv.is_set(0));
-        assert!(pv.is_set(1), "{:#?}", pv);
+        let mut false_positive = vec![];
+        let mut false_negative = vec![];
+        for i in (0..(insertion_input.u)).map(|i| i as u8) {
+            let expected_positive = insertion_input.sets.contains(&i);
 
-        pv.set(12);
-        assert!(pv.is_set(12));
-        assert!(pv.is_set(1));
-    }
+            match (expected_positive, pv.is_set(i)) {
+                (true, false) => false_negative.push(i),
+                (false, true) => false_positive.push(i),
+                _ => (),
+            }
+        }
 
-    #[test]
-    fn min_c16() {
-        let mut pv = PvebU::new(Capacity::C16);
+        if !false_positive.is_empty() || !false_negative.is_empty() {
+            return Err(anyhow!(
+                concat!(
+                    "Incorrect state after setting {:?}. ",
+                    "False negatives: {:?}. ",
+                    "False positives: {:?}."
+                ),
+                insertion_input.sets,
+                false_negative,
+                false_positive
+            ));
+        }
 
-        pv.set(9);
-        assert_eq!(pv.min(), Some(9));
-
-        pv.set(8);
-        assert_eq!(pv.min(), Some(8));
-
-        pv.set(1);
-        pv.set(7);
-        assert_eq!(pv.min(), Some(1));
-
-        pv.unset(1);
-        assert_eq!(pv.min(), Some(7));
+        Ok(())
     }
 }
