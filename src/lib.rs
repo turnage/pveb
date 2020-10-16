@@ -1,4 +1,6 @@
-#[derive(Debug, Clone)]
+use std::collections::VecDeque;
+
+#[derive(Debug, Clone, PartialEq)]
 struct PvebU {
     u: u8,
     u_sqrt: u8,
@@ -7,13 +9,13 @@ struct PvebU {
     clusters: Vec<Cluster>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 struct Summary {
     n: usize,
     pveb: PvebU,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 enum Cluster {
     NonLeaf(PvebU),
     Leaf(bool),
@@ -28,7 +30,7 @@ impl Cluster {
     }
 }
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 enum Capacity {
     Base,
     C2,
@@ -171,6 +173,80 @@ impl PvebU {
         assert!(key < self.u);
 
         *self.find(key)
+    }
+
+    /// Returns the first key in the tree which is greater than `key`.
+    pub fn succ(&self, key: u8) -> Option<u8> {
+        assert!(key < self.u);
+
+        enum SearchMode<'a> {
+            ForCluster { key: u8, pveb: &'a PvebU },
+            ForSuccessor,
+        }
+
+        enum SearchResult<'a> {
+            Found(u8),
+            Continue((u8, &'a PvebU)),
+            Backtrack,
+        }
+
+        fn search_fn<'a>(key: u8, pveb: &'a PvebU) -> SearchResult<'a> {
+            if pveb.u == 2 {
+                if key == 0 && pveb.clusters[1] == Cluster::Leaf(true) {
+                    return SearchResult::Found(1);
+                } else {
+                    return SearchResult::Backtrack;
+                }
+            }
+
+            let cluster_idx = pveb.high_bits(key) as usize;
+            let element_idx = pveb.low_bits(key);
+            SearchResult::Continue((
+                key + pveb.u_sqrt * cluster_idx as u8,
+                match &pveb.clusters[cluster_idx] {
+                    Cluster::NonLeaf(pveb) => pveb,
+                    Cluster::Leaf(_) => panic!("This is wrong."),
+                },
+            ))
+        };
+
+        struct Backtrack<'a> {
+            searched_cluster_idx: usize,
+            pveb: &'a PvebU,
+        }
+
+        let mut queue: Vec<(u8, &PvebU, Option<Backtrack<'_>>, SearchMode<'_>)> =
+            vec![(key, self, None, SearchMode::ForSuccessor)];
+
+        while let Some((key, pveb, back, mode)) = queue.pop() {
+            match search_fn(key, pveb) {
+                SearchResult::Found(key) => match mode {
+                    SearchMode::ForSuccessor => return Some(key),
+                    SearchMode::ForCluster { key, pveb } => {
+                        queue.push((key, pveb, None, SearchMode::ForSuccessor))
+                    }
+                },
+                SearchResult::Backtrack => {
+                    let back = back?;
+                    let key = back.searched_cluster_idx as u8;
+                    let pveb = back.pveb;
+                    queue.push((key, pveb, None, SearchMode::ForCluster { key, pveb }));
+                }
+                SearchResult::Continue((lower_key, lower_pveb)) => {
+                    queue.push((
+                        lower_key,
+                        lower_pveb,
+                        Some(Backtrack {
+                            searched_cluster_idx: pveb.high_bits(key) as usize,
+                            pveb,
+                        }),
+                        mode,
+                    ));
+                }
+            }
+        }
+
+        None
     }
 
     /// Searches the tree for the given key. Returns mutable reference to
