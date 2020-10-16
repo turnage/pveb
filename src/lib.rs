@@ -19,6 +19,15 @@ enum Cluster {
     Leaf(bool),
 }
 
+impl Cluster {
+    pub fn is_empty(&self) -> bool {
+        match self {
+            Cluster::NonLeaf(pveb) => pveb.is_empty(),
+            Cluster::Leaf(switch) => !*switch,
+        }
+    }
+}
+
 #[derive(Debug, Copy, Clone)]
 enum Capacity {
     Base,
@@ -91,76 +100,71 @@ impl PvebU {
     }
 
     pub fn min(&self) -> Option<u8> {
-        self.min_(0)
+        let mut path_key = 0;
+        let mut nav: Option<&PvebU> = Some(self);
+
+        while let Some(pveb) = nav {
+            let i = pveb.clusters.iter().position(|c| !c.is_empty())?;
+            path_key += (i as u8) * pveb.u_sqrt;
+            nav = match &pveb.clusters[i] {
+                Cluster::Leaf(switch) => {
+                    assert!(switch, "This is a requirement for !is_empty");
+                    return Some(path_key);
+                }
+                Cluster::NonLeaf(pveb) => Some(pveb),
+            };
+        }
+
+        None
     }
 
-    fn min_cluster(&self) -> Option<(u8, &PvebU)> {
-        self.clusters
-            .iter()
-            .enumerate()
-            .filter_map(|(idx, cluster)| match cluster {
-                Cluster::NonLeaf(pveb) => Some((idx, pveb)),
-                _ => None,
-            })
-            .find(|(_, pveb)| {
-                pveb.summary
-                    .as_ref()
-                    .map(|summary| summary.n > 0)
-                    .unwrap_or(false)
-            })
-            .map(|(idx, pveb)| (idx as u8, pveb))
-    }
-
-    fn min_leaf(&self) -> Option<u8> {
-        self.clusters
-            .iter()
-            .map(|cluster| match cluster {
-                Cluster::Leaf(switch) => *switch,
-                _ => false,
-            })
-            .position(std::convert::identity)
-            .map(|i| i as u8)
-    }
-
-    fn min_(&self, path_key: u8) -> Option<u8> {
-        let min_cluster = self.min_cluster();
-        let min_leaf = self.min_leaf();
-        match (min_cluster, min_leaf) {
-            (Some((cluster_idx, cluster)), None) => {
-                let path_key = path_key + self.u_sqrt * cluster_idx;
-                cluster.min_(path_key)
+    pub fn is_empty(&self) -> bool {
+        match &self.summary {
+            Some(summary) => summary.n == 0,
+            _ => {
+                assert!(self.u == 2);
+                self.clusters.iter().all(Cluster::is_empty)
             }
-            (None, Some(leaf_idx)) => Some(path_key + leaf_idx),
-            (None, None) => None,
-            (Some(_), Some(_)) => panic!("Pveb has both leaf and nonleaf children: {:#?}", self),
         }
     }
 
     pub fn set(&mut self, key: u8) {
         assert!(key < self.u);
 
-        *self.find_mut(key) = true;
+        let was_set = {
+            let leaf = self.search_mut(key, |_, _| {});
+            let was_set = *leaf;
+            *leaf = true;
+            was_set
+        };
 
-        let cluster_idx = self.high_bits(key);
-        self.summary.iter_mut().for_each(|summary| {
-            summary.n += 1;
-            summary.pveb.set(cluster_idx);
-        });
+        if !was_set {
+            self.search_mut(key, |cluster_idx, summary| {
+                summary.n += 1;
+                summary.pveb.set(cluster_idx);
+            });
+        }
     }
 
     pub fn unset(&mut self, key: &u8) {
         let key = *key;
         assert!(key < self.u);
 
-        *self.find_mut(key) = false;
+        let was_set = {
+            let leaf = self.search_mut(key, |_, _| {});
+            let was_set = *leaf;
+            *leaf = false;
+            was_set
+        };
 
-        let cluster_idx = self.high_bits(key);
-        self.summary.iter_mut().for_each(|summary| {
-            summary.n = summary.n.saturating_sub(1);
-            if summary.n == 0 {
-                summary.pveb.unset(&cluster_idx);
-            }
-        });
+        if was_set {
+            self.search_mut(key, |cluster_idx, summary| {
+                summary.n = summary.n.saturating_sub(1);
+                if summary.n == 0 {
+                    summary.pveb.unset(&cluster_idx);
+                }
+            });
+        }
     }
 
     pub fn is_set(&self, key: u8) -> bool {
@@ -169,16 +173,33 @@ impl PvebU {
         *self.find(key)
     }
 
-    fn find_mut(&mut self, key: u8) -> &mut bool {
+    /// Searches the tree for the given key. Returns mutable reference to
+    /// the appropriate leaf.
+    ///
+    /// On the descent, calls f with each summary block and the index of the
+    /// cluster the algorithm will descend to in the next iteration.
+    fn search_mut<F: Fn(u8, &mut Summary)>(&mut self, key: u8, f: F) -> &mut bool {
         assert!(key < self.u);
 
-        let cluster_idx = self.high_bits(key) as usize;
-        let element_idx = self.low_bits(key);
+        let mut key = key;
+        let mut nav: Option<&mut PvebU> = Some(self);
 
-        match &mut self.clusters[cluster_idx] {
-            Cluster::NonLeaf(pveb) => pveb.find_mut(element_idx),
-            Cluster::Leaf(switch) => switch,
+        while let Some(mut pveb) = nav {
+            let cluster_idx = pveb.high_bits(key) as usize;
+            key = pveb.low_bits(key);
+
+            nav = match &mut pveb.clusters[cluster_idx] {
+                Cluster::NonLeaf(lower_pveb) => {
+                    if let Some(summary) = pveb.summary.as_mut() {
+                        f(cluster_idx as u8, summary);
+                    }
+                    Some(lower_pveb)
+                }
+                Cluster::Leaf(switch) => return switch,
+            }
         }
+
+        unreachable!()
     }
 
     fn find(&self, key: u8) -> &bool {
@@ -321,11 +342,13 @@ mod tests {
                 concat!(
                     "Incorrect state after configuration {:#?}. ",
                     "False negatives: {:?}. ",
-                    "False positives: {:?}."
+                    "False positives: {:?}. ",
+                    "State: {:#?}"
                 ),
                 report,
                 false_negative,
-                false_positive
+                false_positive,
+                pv
             ));
         }
 
@@ -345,11 +368,13 @@ mod tests {
                 concat!(
                     "Incorrect state after configuration: {:#?}. ",
                     "Expected minimum element: {:?}. ",
-                    "Got minimum element: {:?}."
+                    "Got minimum element: {:?}. ",
+                    "State: {:#?}"
                 ),
                 report,
                 expected_min,
-                actual_min
+                actual_min,
+                pv
             ));
         }
 
